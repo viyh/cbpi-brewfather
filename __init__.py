@@ -1,0 +1,84 @@
+from modules import cbpi
+import requests
+
+def get_param(param_name, default_value, param_type, param_desc, param_opts=None):
+    value = cbpi.get_config_parameter(param_name, None)
+    if value is None:
+        cbpi.add_config_parameter(param_name, default_value, param_type, param_desc, param_opts)
+        return default_value
+    return value
+
+def get_config():
+    config = {}
+    config['api_url'] = get_param("brewfather_api_url", "https://log.brewfather.net/stream", "text", "Brewfather API URL Prefix")
+    config['api_key'] = get_param("brewfather_api_key", "", "text", "Brewfather API Key")
+    config['temp_sensor'] = get_param("brewfather_temp_sensor", "sensor", "text", "Brewfather temperature sensor, i.e. 'sensor'")
+    config['temp_unit'] = get_param("brewfather_temp_unit", "C", "select", "Brewfather temperature unit (C or F for Celsius or Fahrenheit)", ["C", "F"])
+    config['gravity_sensor'] = get_param("brewfather_gravity_sensor", "", "text", "Brewfather gravity sensor, i.e. 'sensor2'")
+    config['gravity_unit'] = get_param("brewfather_gravity_unit", "G", "select", "Brewfather gravity unit (G or P for Gravity or Plato)", ["G", "P"])
+    return config
+
+def log(s):
+    print(s)
+    cbpi.app.logger.info(s)
+    # cbpi.notify("bf_task", s, type="danger", timeout=None)
+
+def bf_submit(api_url, api_key, data):
+    response = requests.post(api_url, params={'id': api_key}, json=data)
+    if response.status_code == 200:
+        log("Submitted data: " + str(data))
+        return True
+    else:
+        log("Received unsuccessful response. Ensure API key is correct. HTTP Error Code: " + str(response.status_code))
+        return False
+
+def get_fermenter_sensors_data(fermenter, temp_sensor, temp_unit, gravity_sensor, gravity_unit):
+    data = {
+        "name": fermenter.name,
+        "beer": fermenter.brewname
+    }
+    gravity = get_sensor_value(fermenter, gravity_sensor)
+    temp = get_sensor_value(fermenter, temp_sensor)
+    if gravity:
+        data['gravity'] = gravity
+        data['gravity_unit'] = gravity_unit
+    if temp:
+        data['temp'] = temp
+        data['temp_unit'] = temp_unit
+    return data
+
+def get_sensor_value(fermenter, sensor):
+    if sensor != "":
+        return cbpi.get_sensor_value(int(getattr(fermenter, sensor)))
+    else:
+        return False
+
+@cbpi.backgroundtask(key="bf_task", interval=900)
+def bf_background_task(api):
+    log("Brewfather START")
+    config = get_config()
+
+    if config['api_key'] == "":
+        log("API key not set. Update brewfather_api_key parameter within System > Parameters.")
+        return
+    if config['gravity_sensor'] == "" and config['temp_sensor'] == "":
+        log("No temperature or gravity sensors are set in the parameters.")
+        return
+
+    log("Finding fermenter sensors...")
+    for i, fermenter in cbpi.cache.get("fermenter").iteritems():
+        log("Fermenter: " + str(i) + ": " + fermenter.name + ", State: " + str(fermenter.state))
+        if fermenter.state is not True:
+            continue
+        try:
+            data = get_fermenter_sensors_data(
+                fermenter,
+                config['temp_sensor'],
+                config['temp_unit'],
+                config['gravity_sensor'],
+                config['gravity_unit']
+            )
+            bf_submit(config['api_url'], config['api_key'], data)
+        except Exception as e:
+            log("Unable to send message: " + str(e))
+            pass
